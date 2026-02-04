@@ -997,9 +997,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            actual_seq_lengths_kv = \
-                prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
-
             if get_ascend_device_type() == AscendDeviceType.A5:
                 chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
                     q_nope,
