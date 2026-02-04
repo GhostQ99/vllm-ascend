@@ -943,7 +943,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
 
-        actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
         chunk_outputs = []
         chunk_lses = []
 
