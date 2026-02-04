@@ -1111,6 +1111,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     num_query_heads=self.num_heads,
                     num_key_value_heads=self.num_heads,
                     input_layout="TND",
+                    sparse_mode=3,
                     softmax_scale=self.scale,
                     return_softmax_lse=True)
         else:
