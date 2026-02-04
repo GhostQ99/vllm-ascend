@@ -928,7 +928,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: AscendMLAMetadata,
         prefix_output: torch.Tensor,
         prefix_lse: torch.Tensor,
+        **kwargs
     ):
+        fa_kscale = kwargs.get("fa_kscale", None)
         assert len(kv_c_and_k_pe_cache) > 1
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
@@ -942,6 +944,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        dummy_kv_c_cache = torch.zeros([cache_kv_c.shape[0], cache_kv_c.shape[1], cache_kv_c.shape[2], 1], device="npu").to(cache_kv_c.dtype)
+        dummy_k_pe_cache = torch.zeros([cache_k_pe.shape[0], cache_k_pe.shape[1], cache_k_pe.shape[2], 1], device="npu").to(cache_k_pe.dtype)
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             # chunk_seq_lens will be padded when pcp&dcp
@@ -950,6 +955,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             seq_len = torch.stack([current_seq_len, context_seq_len])
             context_seq_len_npu = self.get_context_seq_len_npu(
                 i, attn_metadata)
+            dummy_kv_c_tensor = torch.empty(
+                toks,
+                num_heads,
+                1,
+                dtype=cache_kv_c.dtype,
+                device=cache_kv_c.device
+            )
+            dummy_k_pe_tensor = torch.empty(
+                toks,
+                num_heads,
+                1,
+                dtype=cache_k_pe.dtype,
+                device=cache_k_pe.device
+            )
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
@@ -961,15 +980,35 @@ class AscendMLAImpl(MLAAttentionImpl):
                                dtype=q_nope.dtype,
                                device=q_nope.device)
             if get_ascend_device_type() == AscendDeviceType.A5:
-                torch_npu.npu_gather_pa_kv_cache(
-                    cache_kv_c,
-                    cache_k_pe,
-                    prefill_metadata.block_table,
-                    context_seq_len_npu,
-                    seq_offset=prefill_metadata.chunked_context.starts[i],
-                    key=kv_c_normed,
-                    value=k_pe,
-                )
+                if cache_kv_c.dtype == cache_k_pe.dtype:
+                    torch_npu.npu_gather_pa_kv_cache(
+                        cache_kv_c,
+                        cache_k_pe,
+                        prefill_metadata.block_table,
+                        context_seq_len_npu,
+                        seq_offset=prefill_metadata.chunked_context.starts[i],
+                        key=kv_c_normed,
+                        value=k_pe,
+                    )
+                else:
+                    torch_npu.npu_gather_pa_kv_cache( # 临时规避 需开发混精 nope:fp8 rope:fp16
+                        cache_kv_c,
+                        dummy_kv_c_cache,
+                        prefill_metadata.block_table,
+                        context_seq_len_npu,
+                        seq_offset=prefill_metadata.chunked_context.starts[i],
+                        key=kv_c_normed,
+                        value=dummy_kv_c_tensor
+                    )
+                    torch_npu.npu_gather_pa_kv_cache(
+                        cache_k_pe,
+                        dummy_k_pe_cache,
+                        prefill_metadata.block_table,
+                        context_seq_len_npu,
+                        seq_offset=prefill_metadata.chunked_context.starts[i],
+                        key=k_pe,
+                        value=dummy_k_pe_tensor
+                    )
             else:
                 torch_npu.atb.npu_paged_cache_load(
                     cache_kv_c,
@@ -988,6 +1027,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
+            kv_c_normed = torch.mul(kv_c_normed.to(fa_kscale.dtype), fa_kscale).to(torch.bfloat16) # 临时规避，反量化
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope \
